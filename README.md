@@ -2,8 +2,11 @@
 
 Web sederhana untuk generate Text-to-Speech (TTS) dengan Gemini API.
 
+Desain profesional gaya Anthropic / Claude: basis kertas hangat, tinta near-black, satu aksen koral, judul serif besar, label bernomor, kartu tenang dengan hairline, tombol pill — tanpa dekorasi AI-generate.
+
 ## Fitur
-- Tab **Generator**: tulis teks (maks 3000 karakter + contoh siap pakai), pilih 29 suara Gemini, model Flash / Pro, bahasa, dan gaya suara, lalu generate audio yang bisa diputar & diunduh sebagai WAV.
+- Tab **Generator**: tulis teks (maks 3000 karakter + contoh siap pakai), pilih 29 suara Gemini, model TTS, bahasa, dan gaya suara, lalu generate audio yang bisa diputar & diunduh sebagai WAV.
+- Model: `gemini-3.8-flash-tts` (default, flagship baru), `gemini-3.8-flash-lite-tts` (tercepat & paling hemat), `gemini-2.5-flash-preview-tts` (lama), `gemini-2.5-pro-preview-tts` (lama, berbayar saja). Model 2.5 / 3.1 preview dijadwalkan pensiun mulai 17 Nov 2026.
 - Tab **Admin Panel**: masukkan Gemini API Key (tampilkan/sembunyikan, tempel clipboard, hapus), uji koneksi, status key tersamar, pengaturan model default & awalan nama file, plus panduan 4 langkah mendapatkan API Key gratis dari Google AI Studio.
 - Panggilan dilakukan langsung dari browser ke Gemini API (`generativelanguage.googleapis.com`) memakai key pengguna sendiri, audio PCM 24kHz dikonversi ke WAV di browser.
 
