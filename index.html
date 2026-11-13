@@ -727,42 +727,72 @@ function modelLabel(id){return MODEL_LABELS[id]||id}
 function syncDefaultModel(){var v=$("defaultModel").value;$("modelSel").value=v;$("kvModel").textContent=modelLabel(v)}
 
 // --- Audio: PCM 16-bit -> WAV ---
-// Respons Gemini kadang menyisakan bunyi statis (noise broadband) atau jeda
-// hening panjang setelah ucapan selesai. Fungsi ini memangkas jendela 10 ms
-// dari akhir selama isinya hening atau statis (RMS kecil, atau RMS besar
-// dengan zero-crossing rate tinggi khas noise), lalu memberi fade-out
-// singkat supaya tidak ada bunyi klik di titik potong.
+// Respons Gemini kadang menyisakan bunyi statis seperti TV rusak setelah
+// ucapan selesai. Polanya ada dua: (1) statis/hening persis di ujung file,
+// (2) ledakan statis singkat yang muncul SETELAH jeda hening pendek di
+// dekat akhir, lalu hening lagi — pola kedua ini lolos dari pangkasan
+// ujung biasa, jadi ditangani khusus. Audio dianalisis per jendela 10 ms:
+// jendela "sampah" = hening (RMS kecil) atau noise broadband (zero-crossing
+// rate tinggi khas statis). Terakhir diberi fade-out menurun yang benar
+// supaya titik potong tidak berbunyi klik/kasar.
 function cleanPcmTail(pcm, sampleRate){
   var n=Math.floor(pcm.length/2);
-  if(n<sampleRate) return pcm;
+  var win=Math.max(1,Math.floor(sampleRate*0.01)); // 10 ms
+  var numWin=Math.floor(n/win);
+  if(numWin<30) return pcm; // audio sangat pendek: biarkan apa adanya
   var dv=new DataView(pcm.buffer,pcm.byteOffset,n*2);
-  var win=Math.max(1,Math.floor(sampleRate*0.01));
-  function windowStats(start){
-    var sum=0,zc=0,prev=0,count=0;
-    for(var i=start;i<start+win&&i<n;i++){
-      var s=dv.getInt16(i*2,true);
-      sum+=s*s; count++;
-      if(count>1&&((prev<0&&s>=0)||(prev>=0&&s<0)))zc++;
+  var rms=new Float32Array(numWin), zcr=new Float32Array(numWin), clip=new Float32Array(numWin);
+  for(var w=0;w<numWin;w++){
+    var sum=0,zc=0,prev=0,cl=0,start=w*win;
+    for(var i=0;i<win;i++){
+      var s=dv.getInt16((start+i)*2,true);
+      sum+=s*s;
+      if(i>0&&((prev<0&&s>=0)||(prev>=0&&s<0)))zc++;
+      if(s>=32700||s<=-32700)cl++;
       prev=s;
     }
-    return count?{rms:Math.sqrt(sum/count),zcr:zc/count}:{rms:0,zcr:0};
+    rms[w]=Math.sqrt(sum/win); zcr[w]=zc/win; clip[w]=cl/win;
   }
-  var end=n, maxTrim=Math.floor(sampleRate*2.5), trimmed=0;
-  while(end>win&&trimmed<maxTrim){
-    var st=windowStats(end-win);
-    var isSilence=st.rms<160;
-    var isStatic=st.rms>=160&&st.zcr>0.28;
-    if(!isSilence&&!isStatic)break;
-    end-=win; trimmed+=win;
+  function isSilence(w){return rms[w]<200}
+  function isNoise(w){return rms[w]>=200&&zcr[w]>0.20}
+  function isJunk(w){return isSilence(w)||isNoise(w)}
+  var end=numWin;
+  // Langkah 1: pangkas sampah (hening/statis) persis di ujung, maks 3,5 dtk.
+  var maxTrimWin=Math.floor(3.5/0.01), t=0;
+  while(end>10&&t<maxTrimWin&&isJunk(end-1)){end--;t++}
+  // Langkah 2: ledakan statis setelah jeda hening di dekat akhir.
+  // Cari jeda hening >= 80 ms terakhir dalam 4 detik terakhir; segmen
+  // sesudah jeda itu dibuang bila pendek dan dominan noise, banyak
+  // clipping (sampel mentok), atau jauh lebih keras dari ucapan
+  // sebelum jeda — ciri khas artefak, bukan kata terakhir yang wajar.
+  var gapWin=8;
+  var searchFrom=Math.max(0,end-Math.floor(4/0.01));
+  for(var g=end-gapWin;g>=searchFrom;g--){
+    var gap=true;
+    for(var k=0;k<gapWin;k++){if(!isSilence(g+k)){gap=false;break}}
+    if(!gap)continue;
+    var segStart=g+gapWin, segLen=end-segStart;
+    if(segLen>=2&&segLen<=150){
+      var noiseCount=0, clipSum=0, segSum=0;
+      for(var m=segStart;m<end;m++){if(isNoise(m))noiseCount++;clipSum+=clip[m];segSum+=rms[m]}
+      var prevSum=0, prevCount=0;
+      for(var p=Math.max(0,g-50);p<g;p++){prevSum+=rms[p];prevCount++}
+      var segAvg=segSum/segLen, prevAvg=prevCount?prevSum/prevCount:0;
+      var isArtifact=(noiseCount/segLen>=0.5)||(clipSum/segLen>0.03)||(segLen<=80&&prevAvg>0&&segAvg>2.2*prevAvg);
+      if(isArtifact) end=g;
+    }
+    break; // hanya jeda hening terdekat dari akhir yang dinilai
   }
-  if(!trimmed) return pcm;
-  var out=new Uint8Array(end*2);
-  out.set(pcm.subarray(0,end*2));
-  var fade=Math.min(Math.floor(sampleRate*0.06),end);
+  var endSample=end*win;
+  var out=new Uint8Array(endSample*2);
+  out.set(pcm.subarray(0,endSample*2));
+  // Fade-out MENURUN 80 ms di ujung audio yang dipertahankan: volume
+  // turun dari penuh ke nol, jadi tidak ada bunyi kasar di titik akhir.
+  var fade=Math.min(Math.floor(sampleRate*0.08),endSample);
   var ov=new DataView(out.buffer);
   for(var j=0;j<fade;j++){
-    var idx=end-fade+j;
-    ov.setInt16(idx*2,Math.round(ov.getInt16(idx*2,true)*(j/fade)),true);
+    var idx=endSample-fade+j;
+    ov.setInt16(idx*2,Math.round(ov.getInt16(idx*2,true)*(1-j/fade)),true);
   }
   return out;
 }
@@ -771,6 +801,23 @@ function pcmToWav(base64List, sampleRate){
   base64List.forEach(function(b64){
     var bin=atob(b64); var bytes=new Uint8Array(bin.length);
     for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    // Jaga-jaga: bila satu potongan ternyata WAV (ber-header RIFF),
+    // lewati headernya sampai subchunk "data" — header yang ikut
+    // terbaca sebagai PCM akan terdengar sebagai bunyi statis.
+    if(bytes.length>44&&bytes[0]===0x52&&bytes[1]===0x49&&bytes[2]===0x46&&bytes[3]===0x46){
+      var off=12, dataOff=-1;
+      while(off+8<=bytes.length){
+        var cid=String.fromCharCode(bytes[off],bytes[off+1],bytes[off+2],bytes[off+3]);
+        var csz=bytes[off+4]|(bytes[off+5]<<8)|(bytes[off+6]<<16)|(bytes[off+7]<<24);
+        if(cid==="data"){dataOff=off+8;break}
+        if(csz<0)break;
+        off+=8+csz+(csz%2);
+      }
+      if(dataOff>0) bytes=bytes.subarray(dataOff);
+    }
+    // PCM 16-bit wajib genap per potongan: satu byte sisa menggeser
+    // seluruh penyelarasan sampel sesudahnya menjadi suara rusak.
+    if(bytes.length%2) bytes=bytes.subarray(0,bytes.length-1);
     chunks.push(bytes); total+=bytes.length;
   });
   var pcm=new Uint8Array(total); var off=0;
