@@ -410,6 +410,7 @@ audio{width:100%;margin-top:12px;height:44px}
         <p class="hint">Disarankan maksimal &plusmn;800 karakter per generate agar tidak timeout. Untuk teks panjang, bagi menjadi beberapa bagian.</p>
         <textarea id="inputText" maxlength="3000" placeholder="Contoh: Halo! Selamat datang. Hari ini kita akan belajar membuat konten suara dengan kecerdasan buatan...">Halo, selamat datang! Ini adalah contoh suara yang dibuat dengan Gemini Text to Speech. Kamu bisa mengganti teks ini dengan naskahmu sendiri.</textarea>
         <div class="charrow"><span>Bahasa Indonesia didukung penuh, termasuk intonasi natural.</span><span class="count"><span id="charCount">0</span> / 3000</span></div>
+        <label class="normrow" style="display:flex;gap:8px;align-items:flex-start;font-size:13px;line-height:1.5;color:var(--muted);cursor:pointer;margin:2px 0 0"><input type="checkbox" id="normalizeNum" checked style="margin-top:2px;accent-color:var(--lime)"><span><strong style="color:var(--ink)">Ubah angka jadi kata sebelum dibacakan</strong> — mis. <em>279.819 &rarr; dua ratus tujuh puluh sembilan ribu delapan ratus sembilan belas</em>, <em>13 Agustus &rarr; tiga belas Agustus</em>. Disarankan untuk voice non-Indonesia (mis. Puck) yang sering salah baca angka mentah. Matikan kalau naskahmu memang harus dibaca apa adanya.</span></label>
         <div class="chips">
           <span class="chips-label">Contoh teks</span>
           <button class="chip" onclick="setExample(0)">Sapaan</button>
@@ -647,6 +648,63 @@ function buildTTSPrompt(text, styleRaw){
   if(!instruction) return text;
   return "#### Director's Notes\nStyle: "+instruction+"\nRule: Speak ONLY the words in the Transcript section below, word for word. Never vocalize these Director's Notes, the style description, the headings, or any instruction words. If a word appears in the style description but not in the transcript, do not say it.\n\n#### Transcript\n"+text;
 }
+
+/* ——— Normalisasi angka ke kata Bahasa Indonesia ———
+   Voice non-Indonesia (mis. Puck) sering salah baca angka mentah:
+   "13" jadi "tiga blas", "279.819" jadi "8 blas ribu star".
+   Karena itu angka berdiri sendiri diubah jadi kata sebelum dikirim
+   ke Gemini ("13 Agustus" -> "tiga belas Agustus",
+   "279.819" -> "dua ratus tujuh puluh sembilan ribu delapan ratus
+   sembilan belas", "3.8" -> "tiga koma delapan", "50%" ->
+   "lima puluh persen"). Token yang mengandung huruf (V80, Rp115,
+   gemini-3.8-flash, URL, jam 02:45) TIDAK disentuh. */
+var ID_ONES=["nol","satu","dua","tiga","empat","lima","enam","tujuh","delapan","sembilan"];
+function numToWordsId(n){
+  n=Math.floor(Math.abs(n));
+  if(n<10) return ID_ONES[n];
+  if(n===10) return "sepuluh";
+  if(n===11) return "sebelas";
+  if(n<20) return ID_ONES[n-10]+" belas";
+  if(n<100){var t=Math.floor(n/10),r=n%10;return ID_ONES[t]+" puluh"+(r?" "+numToWordsId(r):"")}
+  if(n<200) return "seratus"+(n%100?" "+numToWordsId(n%100):"");
+  if(n<1000){var h=Math.floor(n/100),r2=n%100;return ID_ONES[h]+" ratus"+(r2?" "+numToWordsId(r2):"")}
+  if(n<2000) return "seribu"+(n%1000?" "+numToWordsId(n%1000):"");
+  if(n<1000000){var th=Math.floor(n/1000),r3=n%1000;return numToWordsId(th)+" ribu"+(r3?" "+numToWordsId(r3):"")}
+  if(n<1000000000){var m=Math.floor(n/1000000),r4=n%1000000;return numToWordsId(m)+" juta"+(r4?" "+numToWordsId(r4):"")}
+  if(n<1000000000000){var b=Math.floor(n/1000000000),r5=n%1000000000;return numToWordsId(b)+" miliar"+(r5?" "+numToWordsId(r5):"")}
+  if(n<1000000000000000){var tr=Math.floor(n/1000000000000),r6=n%1000000000000;return numToWordsId(tr)+" triliun"+(r6?" "+numToWordsId(r6):"")}
+  return String(n);
+}
+function normalizeNumbersId(text){
+  return String(text||"").split(/(\s+)/).map(function(tok){
+    if(!/\d/.test(tok)) return tok;
+    if(/[A-Za-z]/.test(tok)) return tok; /* V80, Rp115, gemini-3.8, URL */
+    if(/[/:\\-]/.test(tok)) return tok; /* jam, tanggal 13/08, rentang */
+    var m=/^([^0-9]*)([0-9][0-9.,]*)(%?)([^0-9]*)$/.exec(tok);
+    if(!m) return tok;
+    var pre=m[1], core=m[2], pct=m[3], post=m[4];
+    var trail="";
+    while(core.length && /[.,]$/.test(core)){trail=core.slice(-1)+trail;core=core.slice(0,-1)}
+    if(!core) return tok;
+    var words=null;
+    if(/^\d{1,3}(\.\d{3})+$/.test(core)){
+      var v=parseInt(core.replace(/\./g,""),10);
+      if(v<1000000000000000) words=numToWordsId(v);
+    }else if(/^\d+[.,]\d{1,2}$/.test(core)){
+      var parts=core.split(/[.,]/);
+      var ip=parseInt(parts[0],10);
+      if(ip<1000000000000000){
+        words=numToWordsId(ip)+" koma "+parts[1].split("").map(function(d){return ID_ONES[parseInt(d,10)]}).join(" ");
+      }
+    }else if(/^\d+$/.test(core)){
+      var iv=parseInt(core,10);
+      if(iv<1000000000000000) words=numToWordsId(iv);
+    }
+    if(words===null) return tok;
+    if(pct) words+=" persen";
+    return pre+words+trail+post;
+  }).join("");
+}
 function setStylePreset(id, el){
   var p=STYLE_PRESETS[id]; if(!p) return;
   var chips=document.querySelectorAll(".style-chip");
@@ -841,7 +899,10 @@ function parseRate(mime){
 }
 
 async function callGeminiTTS(text, model, voice, lang, style){
-  var finalText=buildTTSPrompt(text, style);
+  var speakText=text;
+  var normBox=$("normalizeNum");
+  if(normBox && normBox.checked) speakText=normalizeNumbersId(text);
+  var finalText=buildTTSPrompt(speakText, style);
   var speechConfig={voiceConfig:{prebuiltVoiceConfig:{voiceName:voice}}};
   if(lang) speechConfig.languageCode=lang;
   var body={contents:[{parts:[{text:finalText}]}],generationConfig:{responseModalities:["AUDIO"],speechConfig:speechConfig}};
